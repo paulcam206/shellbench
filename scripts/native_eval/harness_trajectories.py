@@ -1181,6 +1181,13 @@ def _resolve_deleted_openclaw_session(
     return None, None
 
 
+def _looks_like_windows_path(value: str) -> bool:
+    """True for a drive-qualified or UNC path, which only Windows produces."""
+    if value.startswith("\\\\"):
+        return True
+    return len(value) >= 3 and value[1] == ":" and value[2] in "\\/"
+
+
 def _resolve_archived_openclaw_session_path(
     store_dir: Path,
     entry: dict[str, Any],
@@ -1189,12 +1196,18 @@ def _resolve_archived_openclaw_session_path(
     session_file = entry.get("sessionFile")
     if isinstance(session_file, str) and session_file.strip():
         # Traces are produced by the gateway under test, so a Linux cell yields
-        # POSIX paths that may be read back on a Windows analysis host. Parse
-        # with PurePosixPath when the value looks POSIX: on Windows a plain
-        # Path("/tmp/...") is not "absolute" (no drive), so it would otherwise
-        # be treated as relative and join to the wrong place.
-        source: PurePath = PurePosixPath(session_file) if "\\" not in session_file else PureWindowsPath(session_file)
-        rooted = session_file.startswith("/") or PurePath(session_file).is_absolute()
+        # POSIX paths that may be read back on a Windows analysis host. On
+        # Windows a plain Path("/tmp/...") is not "absolute" (it has no drive),
+        # so it would be treated as relative and joined to the wrong place.
+        # Backslash is a legal character in a POSIX filename, so only a Windows
+        # host may interpret one as a separator.
+        source: PurePath
+        if os.name == "nt" and _looks_like_windows_path(session_file):
+            source = PureWindowsPath(session_file)
+            rooted = source.is_absolute()
+        else:
+            source = PurePosixPath(session_file)
+            rooted = session_file.startswith("/")
         if not rooted:
             candidates.append(store_dir / Path(*source.parts))
         else:

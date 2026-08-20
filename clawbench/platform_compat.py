@@ -60,9 +60,16 @@ def resolve_executable(name: str) -> str | None:
 
 
 def resolve_command(command: Sequence[str]) -> list[str]:
-    """Resolve argv[0] to a concrete executable path, leaving arguments intact."""
+    """Resolve argv[0] to a concrete executable path on Windows only.
+
+    POSIX is deliberately left untouched. `execvp` already performs PATH lookup
+    correctly there, and crucially it does so *after* the child applies `cwd`;
+    resolving in the parent instead would change which executable a relative
+    PATH entry selects. Windows needs the pre-resolution because it has no
+    PATHEXT handling in `subprocess`.
+    """
     argv = list(command)
-    if not argv:
+    if not IS_WINDOWS or not argv:
         return argv
     resolved = resolve_executable(argv[0])
     if resolved:
@@ -284,21 +291,31 @@ def _release_job(process: subprocess.Popen | None) -> None:
 
 
 def posix_shell_executable() -> str | None:
-    """Locate a POSIX shell, including Git for Windows' bash."""
+    """Locate the shell used to run benchmark shell commands.
+
+    On POSIX this is always ``/bin/sh`` -- the shell ``subprocess(shell=True)``
+    uses. Preferring ``bash`` here would silently upgrade fixture semantics on
+    the Linux baseline cell, letting bashisms start working and changing what
+    the benchmark measures.
+
+    On Windows there is no ``/bin/sh``, so Git for Windows' bash is used to keep
+    POSIX quoting semantics intact.
+    """
+    if not IS_WINDOWS:
+        return "/bin/sh"
     for candidate in ("bash", "sh"):
         found = shutil.which(candidate)
         if found:
             return found
-    if IS_WINDOWS:
-        for fallback in (
-            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
-            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-            / "Git"
-            / "bin"
-            / "bash.exe",
-        ):
-            if fallback.exists():
-                return str(fallback)
+    for fallback in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "Git"
+        / "bin"
+        / "bash.exe",
+    ):
+        if fallback.exists():
+            return str(fallback)
     return None
 
 
@@ -321,7 +338,14 @@ def shell_command_argv(command: str) -> list[str]:
 
 
 def default_temp_root() -> Path:
-    """Platform-appropriate replacement for hardcoded /tmp."""
+    """Platform-appropriate replacement for hardcoded /tmp.
+
+    POSIX keeps ``/tmp`` literally so the Linux baseline's paths -- and any
+    tooling that reads them -- are unchanged; ``tempfile.gettempdir()`` would
+    follow ``TMPDIR`` and silently move them in containers.
+    """
+    if not IS_WINDOWS:
+        return Path("/tmp")
     return Path(tempfile.gettempdir())
 
 

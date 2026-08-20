@@ -16,7 +16,7 @@ from clawbench.client import GatewayClient, GatewayConfig
 from clawbench.harness import BenchmarkHarness
 from clawbench.platform_compat import (
     default_temp_root,
-    resolve_executable,
+    resolve_command,
     signal_process_tree,
     spawn_in_process_group,
     terminate_process_tree,
@@ -37,8 +37,10 @@ GATEWAY_PORT_SPACING = max(20, int(os.environ.get("CLAWBENCH_GATEWAY_PORT_SPACIN
 PARALLEL_LANE_ROOT = Path(
     os.environ.get("CLAWBENCH_PARALLEL_LANE_ROOT", str(default_temp_root() / "clawbench-lanes"))
 )
+# Keeps the historical /tmp/gateway.log path on POSIX so existing tooling and
+# runbooks still find it; only Windows needs the relocation.
 GATEWAY_LOG_PATH = Path(
-    os.environ.get("CLAWBENCH_GATEWAY_LOG", str(default_temp_root() / "clawbench-gateway.log"))
+    os.environ.get("CLAWBENCH_GATEWAY_LOG", str(default_temp_root() / "gateway.log"))
 )
 MAX_CONCURRENT_JOBS = max(1, min(8, int(os.environ.get("CLAWBENCH_MAX_CONCURRENT_JOBS", "1"))))
 POLL_INTERVAL = 10
@@ -1708,18 +1710,15 @@ class EvalWorker:
             "/usr/lib/node_modules/openclaw/dist/cli.js",
         ]:
             if Path(path).exists():
-                node = resolve_executable("node")
-                return [node or "node", path]
+                return resolve_command(["node", path])
         for candidate in self._windows_gateway_script_candidates():
             if candidate.exists():
-                node = resolve_executable("node")
-                return [node or "node", str(candidate)]
-        # Resolve to a concrete path: Windows does not apply PATHEXT when
-        # launching a bare command, so an `openclaw.cmd` shim on PATH would
-        # otherwise fail with FileNotFoundError.
-        resolved = resolve_executable("openclaw")
-        if resolved:
-            return [resolved]
+                return resolve_command(["node", str(candidate)])
+        # resolve_command is a no-op on POSIX, where execvp already handles PATH
+        # lookup. On Windows it is required: subprocess does not apply PATHEXT,
+        # so a bare "openclaw" would miss an openclaw.cmd shim on PATH.
+        if shutil.which("openclaw"):
+            return resolve_command(["openclaw"])
         return None
 
     @staticmethod
