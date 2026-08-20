@@ -58,7 +58,7 @@ def build_metadata_supplements(
             supplements.append(
                 {
                     "run_label": run_label,
-                    "archived_manifest": str(manifest_path.relative_to(extracted_root)),
+                    "archived_manifest": manifest_path.relative_to(extracted_root).as_posix(),
                     "supplements": additions,
                 }
             )

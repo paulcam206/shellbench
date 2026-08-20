@@ -1361,3 +1361,52 @@ def atomic_write_json(path: Path, value: object) -> None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class ExclusiveFileLockError(RuntimeError):
+    """Raised when another process already holds an exclusive lock."""
+
+
+def acquire_exclusive_lock(handle) -> None:
+    """Take a non-blocking exclusive lock on an open file handle.
+
+    `fcntl` is POSIX-only and importing it at module scope made this whole
+    module unimportable on Windows. Windows uses `msvcrt.locking`, which raises
+    OSError when the region is already locked.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise ExclusiveFileLockError(str(exc)) from exc
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise ExclusiveFileLockError(str(exc)) from exc
+
+
+def release_exclusive_lock(handle) -> None:
+    """Release a lock taken by `acquire_exclusive_lock`."""
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass

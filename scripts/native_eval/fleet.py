@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import fcntl
 import hashlib
 import json
 import shlex
@@ -20,7 +19,13 @@ from typing import Any, Protocol, Sequence
 
 from scripts.native_eval.checkpoint_loop import count_result_json
 from scripts.native_eval.models import RunSpec
-from scripts.native_eval.runtime import atomic_write_json, utc_now
+from scripts.native_eval.runtime import (
+    ExclusiveFileLockError,
+    acquire_exclusive_lock,
+    atomic_write_json,
+    release_exclusive_lock,
+    utc_now,
+)
 
 
 RUN_SPEC_FIELDS = (
@@ -237,14 +242,14 @@ class RunIndexStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_handle = lock_path.open("a+")
         try:
-            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            acquire_exclusive_lock(self._lock_handle)
+        except ExclusiveFileLockError as exc:
             self._lock_handle.close()
             raise FleetError(f"another fleet controller owns {lock_path}") from exc
         self.data = json.loads(self.path.read_text(encoding="utf-8"))
 
     def close(self) -> None:
-        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+        release_exclusive_lock(self._lock_handle)
         self._lock_handle.close()
 
     def __enter__(self) -> RunIndexStore:

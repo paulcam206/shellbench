@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from scripts.native_eval.models import RunSpec
@@ -1188,9 +1188,15 @@ def _resolve_archived_openclaw_session_path(
     candidates: list[Path] = []
     session_file = entry.get("sessionFile")
     if isinstance(session_file, str) and session_file.strip():
-        source = Path(session_file)
-        if not source.is_absolute():
-            candidates.append(store_dir / source)
+        # Traces are produced by the gateway under test, so a Linux cell yields
+        # POSIX paths that may be read back on a Windows analysis host. Parse
+        # with PurePosixPath when the value looks POSIX: on Windows a plain
+        # Path("/tmp/...") is not "absolute" (no drive), so it would otherwise
+        # be treated as relative and join to the wrong place.
+        source: PurePath = PurePosixPath(session_file) if "\\" not in session_file else PureWindowsPath(session_file)
+        rooted = session_file.startswith("/") or PurePath(session_file).is_absolute()
+        if not rooted:
+            candidates.append(store_dir / Path(*source.parts))
         else:
             session_parts = [index for index, part in enumerate(source.parts) if part == "sessions"]
             if session_parts and session_parts[-1] + 1 < len(source.parts):
