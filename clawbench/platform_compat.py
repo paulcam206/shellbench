@@ -24,19 +24,27 @@ Platform notes:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Sequence
+
+logger = logging.getLogger(__name__)
 
 IS_WINDOWS = os.name == "nt"
 
 # Job handles are keyed by pid so teardown can find the job that owns a child
 # without threading an extra object through every call site.
 _JOB_HANDLES: dict[int, Any] = {}
+
+# Shell discovery runs a verification subprocess, so the answer is cached.
+# "" means "searched and found nothing".
+_CACHED_WINDOWS_SHELL: str | None = None
 
 
 def resolve_executable(name: str) -> str | None:
@@ -290,6 +298,73 @@ def _release_job(process: subprocess.Popen | None) -> None:
         pass
 
 
+def _normalized_dir(path: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.dirname(path)))
+
+
+def _wsl_shell_dirs() -> set[str]:
+    """Directories whose `bash.exe` is really a WSL launcher, not a shell.
+
+    Running benchmark commands through these would execute them inside a Linux
+    VM while the harness believes it is measuring native Windows -- the whole
+    cell would silently be measuring the wrong operating system.
+    """
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    candidates = [
+        os.path.join(system_root, "System32"),
+        os.path.join(system_root, "Sysnative"),
+    ]
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "Microsoft", "WindowsApps"))
+    return {os.path.normcase(os.path.normpath(item)) for item in candidates}
+
+
+def _is_wsl_shell(path: str) -> bool:
+    return _normalized_dir(path) in _wsl_shell_dirs()
+
+
+def _windows_shell_candidates() -> list[str]:
+    """Git for Windows / MSYS2 bash locations, most standard first."""
+    roots: list[str] = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env_name)
+        if base:
+            roots.append(os.path.join(base, "Git"))
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        roots.append(os.path.join(local_app_data, "Programs", "Git"))
+
+    # A Git install that ships bash keeps it beside git.exe's parent.
+    git_exe = shutil.which("git")
+    if git_exe:
+        roots.append(os.path.dirname(os.path.dirname(git_exe)))
+
+    candidates: list[str] = []
+    for root in roots:
+        for relative in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+            candidates.append(os.path.join(root, *relative))
+    return candidates
+
+
+def _shell_handles_windows_paths(shell: str) -> bool:
+    """Confirm `shell` can execute a native Windows path.
+
+    This is the property that actually matters and the one a WSL bash fails, so
+    it is checked directly rather than inferred from the shell's location.
+    """
+    try:
+        completed = subprocess.run(
+            [shell, "-c", f"'{sys.executable}' -c 'print(1)'"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "1"
+
+
 def posix_shell_executable() -> str | None:
     """Locate the shell used to run benchmark shell commands.
 
@@ -298,24 +373,49 @@ def posix_shell_executable() -> str | None:
     the Linux baseline cell, letting bashisms start working and changing what
     the benchmark measures.
 
-    On Windows there is no ``/bin/sh``, so Git for Windows' bash is used to keep
-    POSIX quoting semantics intact.
+    On Windows there is no ``/bin/sh``, so a native POSIX shell (Git for
+    Windows / MSYS2 bash) is used to keep POSIX quoting semantics intact. WSL's
+    ``bash.exe`` is deliberately rejected: it is a different operating system,
+    and whether it wins depends on PATH ordering, so accepting it would make the
+    measured OS a per-machine accident.
     """
     if not IS_WINDOWS:
         return "/bin/sh"
-    for candidate in ("bash", "sh"):
-        found = shutil.which(candidate)
+
+    global _CACHED_WINDOWS_SHELL
+    if _CACHED_WINDOWS_SHELL is not None:
+        return _CACHED_WINDOWS_SHELL or None
+
+    override = os.environ.get("CLAWBENCH_POSIX_SHELL")
+    ordered: list[str] = []
+    if override:
+        ordered.append(override)
+    for name in ("bash", "sh"):
+        found = shutil.which(name)
         if found:
-            return found
-    for fallback in (
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-        / "Git"
-        / "bin"
-        / "bash.exe",
-    ):
-        if fallback.exists():
-            return str(fallback)
+            ordered.append(found)
+    ordered.extend(_windows_shell_candidates())
+
+    seen: set[str] = set()
+    verified_rejects: list[str] = []
+    for candidate in ordered:
+        key = os.path.normcase(os.path.normpath(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if not os.path.exists(candidate):
+            continue
+        if _is_wsl_shell(candidate):
+            verified_rejects.append(candidate)
+            continue
+        if not _shell_handles_windows_paths(candidate):
+            verified_rejects.append(candidate)
+            continue
+        _CACHED_WINDOWS_SHELL = candidate
+        return candidate
+
+    _CACHED_WINDOWS_SHELL = ""
+    logger.debug("No usable POSIX shell found; rejected: %s", verified_rejects)
     return None
 
 
@@ -331,8 +431,12 @@ def shell_command_argv(command: str) -> list[str]:
     shell = posix_shell_executable()
     if shell is None:
         raise RuntimeError(
-            "A POSIX shell is required to run benchmark shell commands. "
-            "On Windows install Git for Windows (provides bash.exe) or WSL."
+            "No usable POSIX shell was found for running benchmark shell commands.\n"
+            "Install Git for Windows, which provides a native bash.exe, or set "
+            "CLAWBENCH_POSIX_SHELL to one.\n"
+            "Note that WSL's bash.exe (under System32 or WindowsApps) is rejected "
+            "on purpose: it runs commands inside Linux, so a 'native Windows' run "
+            "would silently measure a different operating system."
         )
     return [shell, "-c", command]
 

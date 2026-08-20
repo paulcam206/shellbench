@@ -181,6 +181,84 @@ def test_posix_shell_is_bin_sh() -> None:
     assert posix_shell_executable() == "/bin/sh"
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="WSL shells only exist on Windows")
+def test_windows_shell_is_never_wsl() -> None:
+    """WSL's bash.exe runs commands in Linux, not Windows.
+
+    Which bash wins is a PATH-ordering accident, so accepting a WSL one would
+    make the operating system a benchmark run actually measures vary per
+    machine while still reporting itself as native Windows.
+    """
+    shell = posix_shell_executable()
+    if shell is None:
+        pytest.skip("no POSIX shell installed on this machine")
+    shell_dir = os.path.normcase(os.path.normpath(os.path.dirname(shell)))
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    forbidden = {
+        os.path.normcase(os.path.normpath(os.path.join(system_root, "System32"))),
+        os.path.normcase(os.path.normpath(os.path.join(system_root, "Sysnative"))),
+    }
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        forbidden.add(
+            os.path.normcase(
+                os.path.normpath(os.path.join(local_app_data, "Microsoft", "WindowsApps"))
+            )
+        )
+    assert shell_dir not in forbidden
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows path execution is the Windows failure mode")
+def test_windows_shell_can_execute_a_windows_path() -> None:
+    """The selected shell must be able to run the interpreter by its Windows path.
+
+    This is the property WSL bash fails with
+    `/bin/bash: line 1: E:\\...\\python.exe: command not found`, which surfaced
+    as unrelated-looking execution-check failures.
+    """
+    if posix_shell_executable() is None:
+        pytest.skip("no POSIX shell installed on this machine")
+    completed = subprocess.run(
+        shell_command_argv(f"'{sys.executable}' -c 'print(42)'"),
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "42"
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="WSL shells only exist on Windows")
+def test_wsl_bash_is_rejected_even_when_first_on_path(monkeypatch, tmp_path: Path) -> None:
+    """Reproduces the reported failure: WSL bash winning the PATH lookup."""
+    import clawbench.platform_compat as pc
+
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    wsl_bash = Path(system_root) / "System32" / "bash.exe"
+    if not wsl_bash.exists():
+        pytest.skip("WSL bash is not installed on this machine")
+
+    monkeypatch.setattr(pc, "_CACHED_WINDOWS_SHELL", None)
+    monkeypatch.setenv("PATH", str(wsl_bash.parent))
+    monkeypatch.delenv("CLAWBENCH_POSIX_SHELL", raising=False)
+
+    selected = pc.posix_shell_executable()
+    assert selected is None or Path(selected) != wsl_bash
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="override is only consulted on Windows")
+def test_posix_shell_override_is_honoured(monkeypatch) -> None:
+    """The matrix study needs to pin one shell across every cell."""
+    import clawbench.platform_compat as pc
+
+    baseline = pc.posix_shell_executable()
+    if baseline is None:
+        pytest.skip("no POSIX shell installed on this machine")
+
+    monkeypatch.setattr(pc, "_CACHED_WINDOWS_SHELL", None)
+    monkeypatch.setenv("CLAWBENCH_POSIX_SHELL", baseline)
+    assert pc.posix_shell_executable() == baseline
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="guards the Linux baseline specifically")
 def test_resolve_command_is_a_noop_on_posix() -> None:
     """execvp resolves PATH after the child applies cwd; pre-resolving changes that."""
