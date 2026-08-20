@@ -19,6 +19,7 @@ real benchmark runs exist.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 # Make the package importable when run from anywhere
@@ -535,8 +536,10 @@ def test_full_diagnostic_with_surprises():
 
 def test_persistence_roundtrip(tmp_path: Path | None = None):
     """The database should round-trip cleanly through JSON."""
+    # tmp_path stays optional so main() below can run this module standalone;
+    # the fallback uses the platform temp dir rather than a hardcoded /tmp.
     if tmp_path is None:
-        tmp_path = Path("/tmp/clawbench_v05_test")
+        tmp_path = Path(tempfile.mkdtemp(prefix="clawbench_v05_test_"))
     tmp_path.mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "history.json"
     if db_path.exists():

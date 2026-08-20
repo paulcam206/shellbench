@@ -28,19 +28,15 @@ class DummyTask:
         return [object()] * self._phases
 
 
-def test_configure_browser_runtime_sets_benchmark_safe_openclaw_config(monkeypatch):
+def test_configure_browser_runtime_sets_benchmark_safe_openclaw_config(monkeypatch, tmp_path: Path):
     worker = EvalWorker(JobQueue())
-    state_dir = Path("/tmp/test-openclaw-config-basic")
-    if state_dir.exists():
-        import shutil
-
-        shutil.rmtree(state_dir)
+    state_dir = tmp_path / "openclaw-config-basic"
     state_dir.mkdir(parents=True, exist_ok=True)
     config_path = state_dir / "openclaw.json"
     config_path.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state_dir))
 
-    worker._configure_browser_runtime(["node", "/openclaw/dist/cli.js"], {"HOME": "/tmp/home"})
+    worker._configure_browser_runtime(["node", "/openclaw/dist/cli.js"], {"HOME": str(tmp_path / "home")})
 
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "agents": {"defaults": {"skipBootstrap": True}},
@@ -95,14 +91,10 @@ def test_configure_browser_runtime_pins_subagents_to_active_model(monkeypatch):
     assert data["models"]["providers"]["openai-codex"]["auth"] == "api-key"
 
 
-def test_configure_browser_runtime_sets_requested_agent_runtime(monkeypatch):
+def test_configure_browser_runtime_sets_requested_agent_runtime(monkeypatch, tmp_path: Path):
     worker = EvalWorker(JobQueue())
     worker.set_active_model("openai/gpt-5.5")
-    state_dir = Path("/tmp/test-openclaw-config-runtime")
-    if state_dir.exists():
-        import shutil
-
-        shutil.rmtree(state_dir)
+    state_dir = tmp_path / "openclaw-config-runtime"
     state_dir.mkdir(parents=True, exist_ok=True)
     config_path = state_dir / "openclaw.json"
     config_path.write_text(
