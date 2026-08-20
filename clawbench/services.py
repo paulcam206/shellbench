@@ -16,6 +16,11 @@ from typing import Any
 import httpx
 
 from clawbench.paths import resolve_workspace_path
+from clawbench.platform_compat import (
+    shell_command_argv,
+    spawn_in_process_group,
+    terminate_process_tree,
+)
 from clawbench.render import render_shell_template, render_template, render_value
 from clawbench.schemas import BackgroundService
 
@@ -91,15 +96,16 @@ async def start_background_services(
         log_path = log_dir / f"{spec.name}.log"
         log_file = log_path.open("w", encoding="utf-8")
 
-        process = subprocess.Popen(
-            command,
+        # Task fixtures are authored as POSIX shell. Run them through a POSIX
+        # shell on every platform so the same command means the same thing in
+        # every matrix cell; cmd.exe would silently reinterpret the quoting.
+        process = spawn_in_process_group(
+            shell_command_argv(command),
             cwd=cwd,
             env=service_env,
-            shell=True,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
-            start_new_session=True,  # put shell + child in own process group so we can kill the whole tree
         )
         managed = ManagedService(
             spec=spec,
@@ -163,29 +169,9 @@ async def _wait_for_service_ready(
     raise TimeoutError(f"Timed out waiting for background service {spec.name}")
 
 
-def _kill_pgroup(process: subprocess.Popen, sig: int) -> None:
-    """Signal the entire process group so shell-spawned children don't survive."""
-    try:
-        pgid = os.getpgid(process.pid)
-    except ProcessLookupError:
-        return
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass
-
-
 async def stop_background_services(services: list[ManagedService]) -> None:
     for service in reversed(services):
         process = service.process
         if process.poll() is not None:
             continue
-        _kill_pgroup(process, signal.SIGTERM)
-        try:
-            await asyncio.wait_for(asyncio.to_thread(process.wait, 5), timeout=6)
-        except Exception:
-            _kill_pgroup(process, signal.SIGKILL)
-            try:
-                await asyncio.wait_for(asyncio.to_thread(process.wait, 5), timeout=6)
-            except Exception:
-                pass
+        await asyncio.to_thread(terminate_process_tree, process)

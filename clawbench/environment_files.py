@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from clawbench.paths import resolve_workspace_path
+from clawbench.platform_compat import resolve_command, shell_command_argv
 from clawbench.render import render_argv_template, render_shell_template, render_template, render_value
 from clawbench.schemas import (
     ExecutionCheck,
@@ -127,17 +128,21 @@ async def run_execution_check(
         "PYTHONUNBUFFERED": "1",
     }
     python_bin_dir = str(Path(sys.executable).parent)
-    full_env["PATH"] = f"{python_bin_dir}:{full_env.get('PATH', '')}"
+    full_env["PATH"] = f"{python_bin_dir}{os.pathsep}{full_env.get('PATH', '')}"
     python_path_parts = [str(rendered_cwd), str(workspace)]
     existing_pythonpath = full_env.get("PYTHONPATH")
     if existing_pythonpath:
         python_path_parts.append(existing_pythonpath)
-    full_env["PYTHONPATH"] = ":".join(python_path_parts)
+    full_env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
 
     try:
         if spec.shell:
-            process = await asyncio.create_subprocess_shell(
-                rendered_command,
+            # Execution checks are authored as POSIX shell. Running them through
+            # a POSIX shell on every platform keeps verifier semantics identical
+            # across matrix cells; cmd.exe would reinterpret the quoting and
+            # silently change what the check asserts.
+            process = await asyncio.create_subprocess_exec(
+                *shell_command_argv(rendered_command),
                 cwd=str(rendered_cwd),
                 env=full_env,
                 stdout=asyncio.subprocess.PIPE,
@@ -145,7 +150,7 @@ async def run_execution_check(
             )
         else:
             process = await asyncio.create_subprocess_exec(
-                *render_argv_template(spec.command, runtime_values),
+                *resolve_command(render_argv_template(spec.command, runtime_values)),
                 cwd=str(rendered_cwd),
                 env=full_env,
                 stdout=asyncio.subprocess.PIPE,

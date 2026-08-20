@@ -14,6 +14,14 @@ from pathlib import Path
 
 from clawbench.client import GatewayClient, GatewayConfig
 from clawbench.harness import BenchmarkHarness
+from clawbench.platform_compat import (
+    default_temp_root,
+    resolve_executable,
+    signal_process_tree,
+    spawn_in_process_group,
+    terminate_process_tree,
+    user_state_dir,
+)
 from clawbench.queue import JobQueue, JobStatus
 from clawbench.schemas import TaskDefinition
 from clawbench.session_labels import unique_session_label
@@ -26,7 +34,12 @@ GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "18789"))
 GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "clawbench-internal-token")
 GATEWAY_WS_URL = f"ws://localhost:{GATEWAY_PORT}"
 GATEWAY_PORT_SPACING = max(20, int(os.environ.get("CLAWBENCH_GATEWAY_PORT_SPACING", "20")))
-PARALLEL_LANE_ROOT = Path(os.environ.get("CLAWBENCH_PARALLEL_LANE_ROOT", "/tmp/clawbench-lanes"))
+PARALLEL_LANE_ROOT = Path(
+    os.environ.get("CLAWBENCH_PARALLEL_LANE_ROOT", str(default_temp_root() / "clawbench-lanes"))
+)
+GATEWAY_LOG_PATH = Path(
+    os.environ.get("CLAWBENCH_GATEWAY_LOG", str(default_temp_root() / "clawbench-gateway.log"))
+)
 MAX_CONCURRENT_JOBS = max(1, min(8, int(os.environ.get("CLAWBENCH_MAX_CONCURRENT_JOBS", "1"))))
 POLL_INTERVAL = 10
 JOB_HEARTBEAT_INTERVAL_SECONDS = max(15, int(os.environ.get("CLAWBENCH_JOB_HEARTBEAT_SECONDS", "30")))
@@ -859,7 +872,7 @@ class EvalWorker:
         gateway_env = {
             **os.environ,
             "OPENCLAW_HOME": os.environ.get("OPENCLAW_HOME", os.path.expanduser("~")),
-            "OPENCLAW_STATE_DIR": os.environ.get("OPENCLAW_STATE_DIR", os.path.expanduser("~/.openclaw")),
+            "OPENCLAW_STATE_DIR": os.environ.get("OPENCLAW_STATE_DIR", str(user_state_dir())),
             "OPENCLAW_SKIP_GMAIL_WATCHER": "1",
             "OPENCLAW_SKIP_CANVAS_HOST": "1",
             "OPENCLAW_NO_RESPAWN": "1",
@@ -871,32 +884,36 @@ class EvalWorker:
         gateway_env.setdefault("PI_CODING_AGENT_DIR", gateway_env["OPENCLAW_AGENT_DIR"])
         self._configure_browser_runtime(gateway_cmd, gateway_env)
         try:
-            Path("/tmp/gateway.log").write_text("", encoding="utf-8")
+            GATEWAY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            GATEWAY_LOG_PATH.write_text("", encoding="utf-8")
         except Exception:
             pass
 
-        self._gateway_process = subprocess.Popen(
-            [
-                *gateway_cmd,
-                "gateway",
-                "run",
-                "--allow-unconfigured",
-                "--dev",
-                "--bind",
-                "loopback",
-                "--port",
-                str(GATEWAY_PORT),
-                "--auth",
-                "token",
-                "--token",
-                gateway_token,
-                "--compact",
-            ],
-            stdout=open("/tmp/gateway.log", "a", encoding="utf-8"),
-            stderr=subprocess.STDOUT,
-            env=gateway_env,
-            start_new_session=True,  # own process group so we can reap chromium grandchildren on shutdown
-        )
+        log_handle = open(GATEWAY_LOG_PATH, "a", encoding="utf-8")
+        try:
+            self._gateway_process = spawn_in_process_group(
+                [
+                    *gateway_cmd,
+                    "gateway",
+                    "run",
+                    "--allow-unconfigured",
+                    "--dev",
+                    "--bind",
+                    "loopback",
+                    "--port",
+                    str(GATEWAY_PORT),
+                    "--auth",
+                    "token",
+                    "--token",
+                    gateway_token,
+                    "--compact",
+                ],
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=gateway_env,
+            )
+        finally:
+            log_handle.close()
 
         import httpx
 
@@ -1021,7 +1038,7 @@ class EvalWorker:
         lane.log_path.write_text("", encoding="utf-8")
         log_handle = lane.log_path.open("a", encoding="utf-8")
         try:
-            process = subprocess.Popen(
+            process = spawn_in_process_group(
                 [
                     *gateway_cmd,
                     "gateway",
@@ -1041,7 +1058,6 @@ class EvalWorker:
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 env=gateway_env,
-                start_new_session=True,  # own process group so chromium grandchildren get reaped with the gateway
             )
         finally:
             log_handle.close()
@@ -1685,8 +1701,6 @@ class EvalWorker:
         return changed
 
     def _find_gateway_cmd(self) -> list[str] | None:
-        import shutil
-
         for path in [
             "/openclaw/dist/cli.js",
             "/openclaw/dist/index.js",
@@ -1694,10 +1708,37 @@ class EvalWorker:
             "/usr/lib/node_modules/openclaw/dist/cli.js",
         ]:
             if Path(path).exists():
-                return ["node", path]
-        if shutil.which("openclaw"):
-            return ["openclaw"]
+                node = resolve_executable("node")
+                return [node or "node", path]
+        for candidate in self._windows_gateway_script_candidates():
+            if candidate.exists():
+                node = resolve_executable("node")
+                return [node or "node", str(candidate)]
+        # Resolve to a concrete path: Windows does not apply PATHEXT when
+        # launching a bare command, so an `openclaw.cmd` shim on PATH would
+        # otherwise fail with FileNotFoundError.
+        resolved = resolve_executable("openclaw")
+        if resolved:
+            return [resolved]
         return None
+
+    @staticmethod
+    def _windows_gateway_script_candidates() -> list[Path]:
+        """Windows install locations for a globally installed OpenClaw."""
+        if os.name != "nt":
+            return []
+        candidates: list[Path] = []
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(
+                Path(appdata) / "npm" / "node_modules" / "openclaw" / "dist" / "cli.js"
+            )
+        program_files = os.environ.get("ProgramFiles")
+        if program_files:
+            candidates.append(
+                Path(program_files) / "nodejs" / "node_modules" / "openclaw" / "dist" / "cli.js"
+            )
+        return candidates
 
     async def _assert_gateway_control_plane(self, gateway_config: GatewayConfig) -> None:
         # Use a generous dedicated config for the probe. A healthy gateway
@@ -1774,7 +1815,7 @@ class EvalWorker:
 
     def _read_gateway_log(self, limit: int = 4_000) -> str:
         try:
-            return Path("/tmp/gateway.log").read_text(encoding="utf-8", errors="replace")[-limit:]
+            return GATEWAY_LOG_PATH.read_text(encoding="utf-8", errors="replace")[-limit:]
         except Exception:
             return "(no gateway log)"
 
@@ -1788,54 +1829,24 @@ class EvalWorker:
 
     @staticmethod
     def _signal_pgroup(process: subprocess.Popen, sig: int) -> None:
-        """Send a signal to the process group so chromium grandchildren get reaped."""
-        try:
-            pgid = os.getpgid(process.pid)
-        except ProcessLookupError:
-            return
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            pass
+        """Send a signal to the process tree so chromium grandchildren get reaped."""
+        signal_process_tree(process, force=sig == getattr(signal, "SIGKILL", signal.SIGTERM))
 
     def _stop_gateway(self) -> None:
         if not self._gateway_process:
             return
-        self._signal_pgroup(self._gateway_process, signal.SIGTERM)
-        try:
-            self._gateway_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._signal_pgroup(self._gateway_process, signal.SIGKILL)
-            try:
-                self._gateway_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
+        terminate_process_tree(self._gateway_process)
         self._gateway_process = None
 
     def _stop_parallel_gateway(self, lane: ParallelLane) -> None:
         process = self._parallel_gateway_processes.pop(lane.index, None)
         if not process:
             return
-        self._signal_pgroup(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._signal_pgroup(process, signal.SIGKILL)
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
+        terminate_process_tree(process)
 
     def _stop_parallel_gateways(self) -> None:
         for lane_index, process in list(self._parallel_gateway_processes.items()):
-            self._signal_pgroup(process, signal.SIGTERM)
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._signal_pgroup(process, signal.SIGKILL)
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
+                terminate_process_tree(process)
             finally:
                 self._parallel_gateway_processes.pop(lane_index, None)
