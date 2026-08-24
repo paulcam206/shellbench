@@ -1,6 +1,7 @@
 from click.testing import CliRunner
+import pytest
 
-from clawbench.cli import SCENARIO_CHOICES, cli
+from clawbench.cli import SCENARIO_CHOICES, cli, normalize_gateway_url
 from clawbench.schemas import ScenarioDomain
 
 
@@ -137,3 +138,53 @@ def test_empty_gateway_url_falls_back_to_default(monkeypatch, tmp_path):
     captured = _invoke_run(monkeypatch, tmp_path, [])
 
     assert captured["gateway_config"].url == "ws://localhost:18789"
+
+
+def test_gateway_url_strips_shell_quoting(monkeypatch, tmp_path):
+    """Leaked shell quotes otherwise become part of the hostname.
+
+    That surfaces as a DNS gaierror, which looks like a firewall or network
+    problem rather than a quoting typo.
+    """
+    captured = _invoke_run(
+        monkeypatch, tmp_path, ["--gateway-url", "'ws://10.0.0.5:18789'"]
+    )
+
+    assert captured["gateway_config"].url == "ws://10.0.0.5:18789"
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://10.0.0.5:18789",
+        "10.0.0.5:18789",
+        "ws://'10.0.0.5':18789",
+    ],
+)
+def test_gateway_url_rejects_unusable_values(monkeypatch, tmp_path, bad_url):
+    monkeypatch.setattr("clawbench.cli.BenchmarkHarness", _CapturingHarness)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--model",
+            "anthropic/claude-sonnet-4-6",
+            "--runs",
+            "1",
+            "--task",
+            "t1-bugfix-discount",
+            "--output",
+            str(tmp_path / "r.json"),
+            "--gateway-url",
+            bad_url,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "gateway URL" in result.output
+
+
+def test_normalize_gateway_url_accepts_valid_forms():
+    assert normalize_gateway_url("ws://host:1") == "ws://host:1"
+    assert normalize_gateway_url("  wss://host:1  ") == "wss://host:1"
+    assert normalize_gateway_url("") == ""

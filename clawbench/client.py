@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -310,8 +311,9 @@ class GatewayClient:
                     raise
                 delay = min(1.5, 0.25 * attempt)
                 logger.info(
-                    "Gateway connect transient failure (%s); retrying in %.2fs",
+                    "Gateway connect transient failure (%s) for %s; retrying in %.2fs",
                     _describe_connect_error(exc),
+                    self.config.url,
                     delay,
                 )
                 await asyncio.sleep(delay)
@@ -804,6 +806,10 @@ def _is_transient_gateway_connect_error(exc: Exception) -> bool:
 def _describe_connect_error(exc: Exception) -> str:
     if isinstance(exc, InvalidStatus):
         return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, socket.gaierror):
+        # Bare "gaierror" gives no clue that the *hostname* is the problem, which
+        # sends people looking at firewalls and ports instead.
+        return "gaierror (hostname could not be resolved)"
     return exc.__class__.__name__
 
 

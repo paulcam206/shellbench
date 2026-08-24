@@ -16,6 +16,40 @@ from clawbench.schemas import ScenarioDomain
 SCENARIO_CHOICES = [scenario.value for scenario in ScenarioDomain]
 
 
+def normalize_gateway_url(value: str) -> str:
+    """Clean and validate a user-supplied gateway WebSocket URL.
+
+    Shell quoting mistakes are easy to make here and produce badly misleading
+    symptoms: quotes that end up inside the URL become part of the hostname, so
+    the failure is a DNS `gaierror` that looks like a network or firewall
+    problem rather than a typo. Catch those at the boundary instead.
+    """
+    from urllib.parse import urlsplit
+
+    cleaned = value.strip()
+    # Strip quotes that a shell passed through literally.
+    while len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in "\"'":
+        cleaned = cleaned[1:-1].strip()
+    if not cleaned:
+        return ""
+
+    split = urlsplit(cleaned)
+    if split.scheme not in ("ws", "wss"):
+        raise click.BadParameter(
+            f"gateway URL must start with ws:// or wss://, got {cleaned!r}. "
+            "The OpenClaw control UI is served over http://, but the benchmark "
+            "connects to the same gateway over a WebSocket."
+        )
+    if not split.hostname:
+        raise click.BadParameter(f"gateway URL has no host: {cleaned!r}")
+    if any(ch in split.hostname for ch in "\"' "):
+        raise click.BadParameter(
+            f"gateway URL host contains quote or space characters: {split.hostname!r}. "
+            "This usually means shell quoting leaked into the value."
+        )
+    return cleaned
+
+
 @click.group()
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
 def cli(verbose: bool) -> None:
@@ -158,6 +192,7 @@ def run(
     insights_dir: Path,
     dynamics: bool,
 ) -> None:
+    gateway_url = normalize_gateway_url(gateway_url)
     gateway_config = (
         GatewayConfig(url=gateway_url, token=gateway_token)
         if gateway_url
