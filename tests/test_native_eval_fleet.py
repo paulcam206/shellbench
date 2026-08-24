@@ -21,6 +21,7 @@ from scripts.native_eval.fleet import (
     parse_args,
 )
 from scripts.native_eval.models import RunSpec
+from scripts.native_eval.runtime import atomic_write_json
 
 
 def _run_spec(
@@ -931,6 +932,36 @@ def test_provider_cap_counts_adopted_run_before_dispatching_same_provider(
     assert adopted_stop < pending_fable_dispatch
 
 
+def _start_controller(config, executor) -> tuple[threading.Thread, list[int], list[BaseException]]:
+    """Run a FleetController on a thread, keeping any exception it raises.
+
+    Appending the return value directly loses the exception: a failing run
+    leaves the result list empty, so the test reports `assert [] == [0]` while
+    the real traceback is buried in captured output.
+    """
+    result: list[int] = []
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(FleetController(config, executor=executor).run())
+        except BaseException as exc:  # surfaced by _assert_controller_succeeded
+            errors.append(exc)
+
+    return threading.Thread(target=_run), result, errors
+
+
+def _assert_controller_succeeded(
+    controller: threading.Thread,
+    result: list[int],
+    errors: list[BaseException],
+) -> None:
+    assert not controller.is_alive()
+    if errors:
+        raise AssertionError(f"FleetController.run() raised: {errors[0]!r}") from errors[0]
+    assert result == [0]
+
+
 def test_slow_capped_model_does_not_block_refilling_eligible_slot(
     tmp_path: Path,
 ) -> None:
@@ -961,10 +992,7 @@ def test_slow_capped_model_does_not_block_refilling_eligible_slot(
         expected_counts={label: 2 for label in labels},
         checkpoint_blocks={slow_fable: release_slow},
     )
-    result: list[int] = []
-    controller = threading.Thread(
-        target=lambda: result.append(FleetController(config, executor=executor).run())
-    )
+    controller, result, errors = _start_controller(config, executor)
     controller.start()
     try:
         assert executor.wait_for_dispatch(later_gpt, timeout=2)
@@ -974,8 +1002,7 @@ def test_slow_capped_model_does_not_block_refilling_eligible_slot(
         release_slow.set()
         controller.join(timeout=5)
 
-    assert not controller.is_alive()
-    assert result == [0]
+    _assert_controller_succeeded(controller, result, errors)
     assert executor.dispatches.index(later_gpt) < executor.dispatches.index(capped_fable)
     assert executor.max_active_leases == 2
 
@@ -1037,10 +1064,7 @@ def test_recovery_pending_entries_respect_capacity_behind_owned_runs(
     executor.active_leases = len(owned_labels)
     executor.max_active_leases = len(owned_labels)
 
-    result: list[int] = []
-    controller = threading.Thread(
-        target=lambda: result.append(FleetController(config, executor=executor).run())
-    )
+    controller, result, errors = _start_controller(config, executor)
     controller.start()
     try:
         assert executor.wait_for_dispatch(pending_labels[0], timeout=2)
@@ -1057,11 +1081,74 @@ def test_recovery_pending_entries_respect_capacity_behind_owned_runs(
         release_runs.set()
         controller.join(timeout=10)
 
-    assert not controller.is_alive()
-    assert result == [0]
+    _assert_controller_succeeded(controller, result, errors)
     assert not set(owned_labels) & set(executor.dispatches)
     assert all(("checkpoint", label) in executor.events for label in owned_labels)
     assert executor.max_active_leases == 10
+
+
+def test_atomic_write_json_retries_transient_windows_lock(tmp_path: Path, monkeypatch) -> None:
+    """os.replace fails on Windows while any handle holds the target open.
+
+    POSIX rename() succeeds in the same situation, so this failure mode only
+    appears on Windows -- as a hard PermissionError from a virus scanner or
+    indexer holding the file for a few milliseconds.
+    """
+    target = tmp_path / "run_index.json"
+    target.write_text("{}", encoding="utf-8")
+    calls: list[int] = []
+    real_replace = Path.replace
+
+    def flaky_replace(self: Path, dest):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(self, dest)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    atomic_write_json(target, {"runs": [], "ok": True})
+
+    assert len(calls) == 3
+    assert json.loads(target.read_text(encoding="utf-8"))["ok"] is True
+
+
+def test_atomic_write_json_gives_up_after_persistent_lock(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "run_index.json"
+
+    def always_denied(self: Path, dest):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(Path, "replace", always_denied)
+
+    with pytest.raises(PermissionError):
+        atomic_write_json(target, {"runs": []})
+
+    # The scratch file must not be left behind for the next writer to trip over.
+    assert not list(target.parent.glob(".run_index.json.*.tmp"))
+
+
+def test_atomic_write_json_uses_a_unique_scratch_name_per_call(tmp_path: Path) -> None:
+    """Thread pools share a pid, so a pid-only temp name collides between workers."""
+    seen: list[str] = []
+    real_write = Path.write_text
+
+    def record(self: Path, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            seen.append(self.name)
+        return real_write(self, *args, **kwargs)
+
+    target = tmp_path / "run_index.json"
+    original = Path.write_text
+    Path.write_text = record  # type: ignore[method-assign]
+    try:
+        atomic_write_json(target, {"a": 1})
+        atomic_write_json(target, {"a": 2})
+    finally:
+        Path.write_text = original  # type: ignore[method-assign]
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
 
 
 def test_parse_args_accepts_repeatable_model_limits(tmp_path: Path) -> None:

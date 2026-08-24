@@ -1351,12 +1351,45 @@ async def _drain(
 
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # The fleet controller writes the run index from a thread pool, so the
+    # scratch name must be unique per *thread*, not just per process: os.getpid()
+    # alone gave every worker the same temp path to race over.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     temporary.write_text(
         json.dumps(value, indent=2, sort_keys=False) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    try:
+        _replace_with_retry(temporary, path)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _replace_with_retry(source: Path, target: Path, *, attempts: int = 10) -> None:
+    """Replace `target` with `source`, tolerating transient Windows locks.
+
+    POSIX rename() succeeds even while another process holds the target open.
+    Windows refuses with `PermissionError: [WinError 5] Access is denied` if any
+    handle is open without FILE_SHARE_DELETE -- which a virus scanner, a search
+    indexer, or a concurrent reader can cause at any moment. Those locks are
+    released within milliseconds, so a short retry converts a spurious hard
+    failure into a brief wait. On POSIX the first attempt always succeeds and
+    this costs nothing.
+    """
+    delay = 0.01
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
 
 
 def utc_now() -> str:
