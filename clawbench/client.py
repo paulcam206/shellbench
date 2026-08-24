@@ -658,9 +658,12 @@ class GatewayClient:
 
         if not response.get("ok", False):
             error = response.get("error", {})
-            raise RuntimeError(
-                f"RPC {method} failed: {error.get('code', '?')} - {error.get('message', '')}"
-            )
+            code = error.get("code", "?")
+            message = f"RPC {method} failed: {code} - {error.get('message', '')}"
+            hint = _connect_error_hint(code)
+            if hint:
+                message = f"{message}\n{hint}"
+            raise RuntimeError(message)
         return response
 
     async def _listener(self) -> None:
@@ -801,6 +804,28 @@ def _is_transient_gateway_connect_error(exc: Exception) -> bool:
     if isinstance(exc, OSError):
         return True
     return False
+
+
+def _connect_error_hint(code: str) -> str:
+    """Actionable guidance for gateway errors that are easy to misread.
+
+    Relevant when measuring a gateway the harness does not own: ClawBench
+    configures away device pairing on gateways it starts itself, but it cannot
+    do that for one you started, so the same setup has to be done by hand.
+    """
+    if str(code).strip().upper() != "NOT_PAIRED":
+        return ""
+    return (
+        "The gateway requires this device to be approved before it will accept "
+        "RPCs. Either approve the pending device in the gateway's control UI "
+        "(the identity is persisted at <OPENCLAW_STATE_DIR>/identity/device.json "
+        "and reused, so approving once is enough), or disable device auth on the "
+        "gateway with gateway.controlUi.allowInsecureAuth=true and "
+        "gateway.controlUi.dangerouslyDisableDeviceAuth=true, then set "
+        "CLAWBENCH_DISABLE_GATEWAY_DEVICE_IDENTITY=1 for this process. "
+        "ClawBench applies both of those automatically to gateways it starts "
+        "itself, but cannot configure a gateway it is only attaching to."
+    )
 
 
 def _describe_connect_error(exc: Exception) -> str:

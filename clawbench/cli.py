@@ -10,7 +10,7 @@ from pathlib import Path
 import click
 
 from clawbench.client import GatewayConfig
-from clawbench.harness import BenchmarkHarness, KNOWN_ADAPTERS
+from clawbench.harness import BenchmarkHarness, KNOWN_ADAPTERS, warn_if_gateway_is_remote
 from clawbench.schemas import ScenarioDomain
 
 SCENARIO_CHOICES = [scenario.value for scenario in ScenarioDomain]
@@ -193,6 +193,8 @@ def run(
     dynamics: bool,
 ) -> None:
     gateway_url = normalize_gateway_url(gateway_url)
+    if gateway_url:
+        warn_if_gateway_is_remote(gateway_url)
     gateway_config = (
         GatewayConfig(url=gateway_url, token=gateway_token)
         if gateway_url

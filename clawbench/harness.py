@@ -59,6 +59,43 @@ class _NullCtx:
         return None
 
 
+_LOCAL_GATEWAY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})
+
+
+def warn_if_gateway_is_remote(url: str) -> str:
+    """Warn when a gateway URL points at another machine.
+
+    ClawBench and the gateway must share a filesystem. The harness creates each
+    task workspace locally, hands the gateway that local absolute path as the
+    agent's workspace, and then verifies the resulting files locally. Background
+    services are also bound to the local loopback and handed to the agent as
+    http://127.0.0.1:<port>.
+
+    Against a gateway on another host none of that resolves: the agent works
+    somewhere else (or nowhere), and completion verification reads an empty
+    local directory. That does not raise -- it silently scores zero, which is
+    indistinguishable from a model that simply failed the task. Warn loudly
+    rather than block, because a gateway in a container that shares the host
+    filesystem at identical paths is a supported and useful setup.
+    """
+    from urllib.parse import urlsplit
+
+    if not url:
+        return ""
+    host = (urlsplit(url).hostname or "").lower()
+    if not host or host in _LOCAL_GATEWAY_HOSTS:
+        return ""
+    message = (
+        f"Gateway host {host!r} is not local. ClawBench creates task workspaces on "
+        "this machine, passes their local paths to the gateway, and verifies the "
+        "resulting files here, so a gateway on another host will appear to fail "
+        "every file-based task rather than report an error. Run ClawBench on the "
+        "same machine as the gateway, or ensure both see identical paths."
+    )
+    logger.warning(message)
+    return message
+
+
 class BenchmarkHarness:
     def __init__(
         self,

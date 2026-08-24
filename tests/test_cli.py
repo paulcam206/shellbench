@@ -2,6 +2,7 @@ from click.testing import CliRunner
 import pytest
 
 from clawbench.cli import SCENARIO_CHOICES, cli, normalize_gateway_url
+from clawbench.harness import warn_if_gateway_is_remote
 from clawbench.schemas import ScenarioDomain
 
 
@@ -188,3 +189,20 @@ def test_normalize_gateway_url_accepts_valid_forms():
     assert normalize_gateway_url("ws://host:1") == "ws://host:1"
     assert normalize_gateway_url("  wss://host:1  ") == "wss://host:1"
     assert normalize_gateway_url("") == ""
+
+
+@pytest.mark.parametrize("url", ["ws://localhost:18789", "ws://127.0.0.1:18789", "ws://[::1]:18789"])
+def test_local_gateway_urls_do_not_warn(url):
+    assert warn_if_gateway_is_remote(url) == ""
+
+
+def test_remote_gateway_url_warns():
+    """A remote gateway silently scores zero instead of erroring.
+
+    The harness creates task workspaces locally, hands the gateway those local
+    paths, and verifies the resulting files locally, so a gateway on another
+    host looks like a model that failed every task rather than a broken setup.
+    """
+    message = warn_if_gateway_is_remote("ws://10.0.0.5:18789")
+
+    assert "not local" in message
