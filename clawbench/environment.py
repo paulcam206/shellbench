@@ -11,7 +11,7 @@ from typing import Any
 
 from clawbench.client import GatewayClient
 from clawbench.paths import resolve_workspace_path
-from clawbench.platform_compat import resolve_command, shell_command_argv
+from clawbench.platform_compat import interpreter_bin_dir, resolve_command, shell_command_argv
 from clawbench.render import render_argv_template, render_shell_template, render_template, render_value
 from clawbench.schemas import (
     CompletionResult,
@@ -130,14 +130,13 @@ async def run_execution_check(
         )
     rendered_env = render_value(spec.env, runtime_values)
     import os
-    import sys
 
     full_env = {
         **os.environ,
         **{key: str(value) for key, value in rendered_env.items()},
         "PYTHONUNBUFFERED": "1",
     }
-    python_bin_dir = str(Path(sys.executable).parent)
+    python_bin_dir = interpreter_bin_dir()
     full_env["PATH"] = f"{python_bin_dir}{os.pathsep}{full_env.get('PATH', '')}"
     python_path_parts = [str(rendered_cwd), str(workspace)]
     existing_pythonpath = full_env.get("PYTHONPATH")

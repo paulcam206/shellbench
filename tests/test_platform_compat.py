@@ -18,6 +18,8 @@ import pytest
 from clawbench.platform_compat import (
     IS_WINDOWS,
     default_temp_root,
+    ensure_python3_alias,
+    interpreter_bin_dir,
     posix_shell_executable,
     resolve_command,
     resolve_executable,
@@ -164,6 +166,55 @@ def test_spawn_in_process_group_runs_and_reports_exit_code() -> None:
 
 def test_default_temp_root_exists() -> None:
     assert default_temp_root().is_dir()
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="python3 already exists on POSIX")
+def test_python3_alias_is_created_next_to_the_interpreter() -> None:
+    """Tasks invoke `python3`, which Windows does not ship.
+
+    22 of the 29 public task files call it, so without an alias those tasks
+    fail with "python3: command not found" and score zero -- a broken cell that
+    looks like a bad model.
+    """
+    alias = ensure_python3_alias()
+
+    assert alias is not None
+    assert Path(alias).name == "python3.exe"
+    # It must sit beside the real interpreter: a venv python locates its
+    # environment from its own directory, so a copy elsewhere cannot import
+    # the project.
+    assert Path(alias).parent == Path(sys.executable).parent
+
+
+def test_python3_is_runnable_through_the_benchmark_path() -> None:
+    """`python3` must work in a shell that uses the benchmark's PATH."""
+    env = dict(os.environ)
+    env["PATH"] = f"{interpreter_bin_dir()}{os.pathsep}{env.get('PATH', '')}"
+
+    completed = subprocess.run(
+        shell_command_argv("python3 -c 'print(6*7)'"),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "42"
+
+
+def test_pytest_is_runnable_through_the_benchmark_path() -> None:
+    """Several tasks run `pytest -q` as their execution check."""
+    env = dict(os.environ)
+    env["PATH"] = f"{interpreter_bin_dir()}{os.pathsep}{env.get('PATH', '')}"
+
+    completed = subprocess.run(
+        shell_command_argv("pytest --version"),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="guards the Linux baseline specifically")

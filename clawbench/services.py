@@ -16,6 +16,7 @@ import httpx
 
 from clawbench.paths import resolve_workspace_path
 from clawbench.platform_compat import (
+    interpreter_bin_dir,
     shell_command_argv,
     spawn_in_process_group,
     terminate_process_tree,
@@ -83,6 +84,9 @@ async def start_background_services(
         if spec.port_env:
             service_env[spec.port_env] = str(port)
         service_env.setdefault("PYTHONUNBUFFERED", "1")
+        # Task fixtures invoke `python3`, which does not exist on Windows unless
+        # the interpreter directory (carrying the python3 alias) is on PATH.
+        service_env["PATH"] = f"{interpreter_bin_dir()}{os.pathsep}{service_env.get('PATH', '')}"
 
         command = render_shell_template(spec.command, values)
         cwd = resolve_workspace_path(

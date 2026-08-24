@@ -441,6 +441,49 @@ def shell_command_argv(command: str) -> list[str]:
     return [shell, "-c", command]
 
 
+def ensure_python3_alias() -> str | None:
+    """Make a `python3` command available on Windows, next to this interpreter.
+
+    Benchmark tasks invoke `python3 verify_x.py` -- 22 of the 29 public task
+    files do. That name exists on Linux and macOS but Windows installs only
+    `python.exe`, so without this every one of those checks fails with
+    "python3: command not found" and the task scores zero. That is a broken
+    cell masquerading as a bad model, which is exactly the misattribution the
+    OS comparison has to avoid.
+
+    The alias is created by copying the interpreter rather than by rewriting
+    the task's command, so the command string stays byte-identical across
+    every cell and the cells stay comparable.
+
+    It must live beside the real executable: a venv's python.exe locates its
+    environment from its own directory, and a copy placed anywhere else dies
+    with "failed to locate pyvenv.cfg".
+    """
+    if not IS_WINDOWS:
+        return None
+    executable = Path(sys.executable)
+    alias = executable.with_name("python3.exe")
+    if alias.exists():
+        return str(alias)
+    try:
+        shutil.copy2(executable, alias)
+    except OSError as exc:
+        logger.warning(
+            "Could not create a python3 alias next to %s (%s). Tasks that call "
+            "python3 will fail on this machine.",
+            executable,
+            exc,
+        )
+        return None
+    return str(alias)
+
+
+def interpreter_bin_dir() -> str:
+    """Directory to prepend to PATH so tasks find `python3`, `pytest`, and friends."""
+    ensure_python3_alias()
+    return str(Path(sys.executable).parent)
+
+
 def default_temp_root() -> Path:
     """Platform-appropriate replacement for hardcoded /tmp.
 
