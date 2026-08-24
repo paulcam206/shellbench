@@ -38,6 +38,16 @@ def cli(verbose: bool) -> None:
 )
 @click.option("--gateway-token", envvar="OPENCLAW_GATEWAY_TOKEN", default="", help="Gateway auth token")
 @click.option(
+    "--gateway-url",
+    envvar="OPENCLAW_GATEWAY_URL",
+    default="",
+    help=(
+        "WebSocket URL of an already-running OpenClaw gateway to measure "
+        "(default: ws://localhost:18789). Point this at a gateway you started "
+        "yourself to benchmark a specific instance, host, or port."
+    ),
+)
+@click.option(
     "--judge-model",
     envvar="CLAWBENCH_JUDGE_MODEL",
     default="",
@@ -126,6 +136,7 @@ def run(
     model: str,
     adapter: str,
     gateway_token: str,
+    gateway_url: str,
     judge_model: str,
     judge_affects_score: bool,
     runs: int,
@@ -147,7 +158,11 @@ def run(
     insights_dir: Path,
     dynamics: bool,
 ) -> None:
-    gateway_config = GatewayConfig(token=gateway_token)
+    gateway_config = (
+        GatewayConfig(url=gateway_url, token=gateway_token)
+        if gateway_url
+        else GatewayConfig(token=gateway_token)
+    )
     harness = BenchmarkHarness(
         gateway_config=gateway_config,
         model=model,
